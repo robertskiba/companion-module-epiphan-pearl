@@ -13,10 +13,12 @@ const get_config_fields = () => {
 		{
 			type: 'textinput',
 			id: 'host',
-			label: 'Target IP',
+			label: 'Target IP or hostname',
 			width: 6,
 			default: '192.168.255.250',
-			regex: Regex.IP,
+			// hostnames are allowed too, e.g. <serial number>.local, the name a Pearl announces on the network
+			regex: Regex.HOSTNAME,
+			tooltip: 'IP address or hostname of the Pearl, e.g. 192.168.1.20 or <serial number>.local',
 		},
 		{
 			type: 'textinput',

@@ -17,7 +17,12 @@ module.exports = {
 			})
 			values[`channel_${cid}_active_layout`] = activeLayout ? activeLayout.name : ''
 
-			const videoEncoder = (channel.encoders || []).find((e) => e.type === 'video')
+			// API v2.0 marks the video encoder with type 'video', the v1 API has no type, there the video
+			// encoder is the one reporting a resolution
+			const encoders = channel.encoders || []
+			const videoEncoder =
+				encoders.find((e) => e.type === 'video') ??
+				encoders.find((e) => e.type === undefined && (e.status?.resolution || e.resolution))
 			if (videoEncoder) {
 				const encStatus = videoEncoder.status ?? {}
 				variables.push({

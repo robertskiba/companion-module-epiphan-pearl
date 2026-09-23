@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - If your Pearl runs a firmware older than 4.24.1, the connection shows a warning recommending a firmware update
 - If the Pearl is not reachable, the module tries to reconnect every 10 seconds
+- The Pearl can be entered by hostname as well as by IP address, e.g. `<serial number>.local`
+- A wrong username or password is shown as such in the connection status
 
 ### Bug Fixes
 
@@ -30,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Buttons and feedbacks could stop updating when the Pearl was not reachable or did not support a feature
 - Presets now have proper names, and recorders with the same name each get their own presets
 - Recorders without a name no longer show up as "undefined"
+- The variables for resolution and bitrate stayed empty with firmware older than 4.24.1
+- "Set Content Metadata" updated the metadata variables even if the Pearl rejected the new values
+- The connection was shown as failed when the Pearl only rejected a single command, e.g. a marker
 - Clearer error messages, e.g. when a marker can't be set because the channel is not recording
 - Improved stability and error handling
 
