@@ -40,9 +40,10 @@ module.exports = {
 				) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Channel and layout are not known! Please review your button config'
+						'Channel and layout are not known! Please review your button config',
 					)
-					this.debug('channelIdlayoutId: ' + action.options.channelIdlayoutId)
+					// Fix: InstanceBase has no debug() method, use log()
+					this.log('debug', 'channelIdlayoutId: ' + action.options.channelIdlayoutId)
 					return
 				}
 
@@ -50,7 +51,7 @@ module.exports = {
 				if (!this.state.channels[channelId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing channel! Please review your button config'
+						'Action on non existing channel! Please review your button config',
 					)
 					this.log('error', 'Action on non existing channel: ' + channelId)
 					return
@@ -58,7 +59,7 @@ module.exports = {
 				if (!this.state.channels[channelId].layouts[layoutId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing layout! Please review your button config'
+						'Action on non existing layout! Please review your button config',
 					)
 					this.log('error', 'Action on non existing layout ' + layoutId + ' on channel ' + channelId)
 					return
@@ -69,12 +70,16 @@ module.exports = {
 				body = { id: Number(layoutId) }
 				callback = (response) => {
 					if (response && response.status === 'ok') {
-						this.updateActiveChannelLayout(channelId, layoutId)
+						// return the promise so a failing refresh is caught below
+						return this.updateActiveChannelLayout(channelId)
 					}
 				}
 
 				// Send request
-				this.sendRequest(type, url, body).then(callback)
+				// Fix: sendRequest() throws on any failure, without catch this was an unhandled promise rejection
+				this.sendRequest(type, url, body)
+					.then(callback)
+					.catch((error) => this.log('error', 'Layout could not be changed: ' + error.message))
 			},
 		}
 
@@ -114,9 +119,10 @@ module.exports = {
 				) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Channel or Publisher are not valid! Please review your button config'
+						'Channel or Publisher are not valid! Please review your button config',
 					)
-					this.debug('Undefined channelIdpublisherId ... ' + action.options.channelIdpublisherId)
+					// Fix: InstanceBase has no debug() method, use log()
+					this.log('debug', 'Undefined channelIdpublisherId ... ' + action.options.channelIdpublisherId)
 					return
 				}
 
@@ -124,7 +130,7 @@ module.exports = {
 				if (!this.state.channels[channelId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing channel! Please review your button config.'
+						'Action on non existing channel! Please review your button config.',
 					)
 					this.log('error', 'Action on non existing channel: ' + channelId)
 					return
@@ -132,7 +138,7 @@ module.exports = {
 				if (publisherId !== 'all' && !this.state.channels[channelId].publishers[publisherId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing publisher! Please review your button config.'
+						'Action on non existing publisher! Please review your button config.',
 					)
 					this.log('error', 'Action on non existing publisher ' + publisherId + ' on channel ' + channelId)
 					return
@@ -146,12 +152,13 @@ module.exports = {
 					// toggle
 					let isStreaming
 					const channel = this.state.channels[channelId]
+					// Fix: status is missing if the publisher status request failed, use optional chaining
 					if (publisherId !== 'all') {
-						isStreaming = channel.publishers[publisherId].status.state === 'started'
+						isStreaming = channel.publishers[publisherId].status?.state === 'started'
 					} else {
 						// if we should toggle all, check if there is at least one not streaming and then turn it on
 						isStreaming = !Object.keys(channel.publishers)
-							.map((id) => channel.publishers[id].status.state)
+							.map((id) => channel.publishers[id].status?.state)
 							.some((state) => state !== 'started')
 					}
 					startStopAction = isStreaming ? 'stop' : 'start'
@@ -164,7 +171,10 @@ module.exports = {
 				}
 
 				// Send request
-				this.sendRequest(type, url, body)
+				// Fix: catch request errors to avoid an unhandled promise rejection
+				this.sendRequest(type, url, body).catch((error) =>
+					this.log('error', 'Streaming could not be controlled: ' + error.message),
+				)
 			},
 		}
 
@@ -202,7 +212,7 @@ module.exports = {
 				if (!this.state.recorders[recorderId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing recorder! Please review your button config.'
+						'Action on non existing recorder! Please review your button config.',
 					)
 					this.log('warn', 'Action on non existing recorder ' + recorderId)
 					return
@@ -229,7 +239,7 @@ module.exports = {
 				} else {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Called an unknown action! Please review your button config.'
+						'Called an unknown action! Please review your button config.',
 					)
 					this.log('error', 'Called an unknown action: ' + action.options.startStopAction)
 					return
@@ -237,11 +247,15 @@ module.exports = {
 
 				callback = async (response) => {
 					if (response && response.status === 'ok') {
-						this.updateRecorderStatus(recorderId)
+						// return the promise so a failing refresh is caught below
+						return this.updateRecorderStatus()
 					}
 				}
 				// Send request
-				this.sendRequest(type, url, body).then(callback)
+				// Fix: catch request errors to avoid an unhandled promise rejection
+				this.sendRequest(type, url, body)
+					.then(callback)
+					.catch((error) => this.log('error', 'Recorder could not be controlled: ' + error.message))
 			},
 		}
 
@@ -267,8 +281,9 @@ module.exports = {
 			callback: async (action) => {
 				let type = 'post'
 				let url = `/api/channels/${action.options.channel}/bookmarks`
+				// module-base 2.x: Companion already replaced the variables in options with useVariables
 				let body = {
-					text: await this.parseVariablesInString(action.options.markertext),
+					text: action.options.markertext,
 				}
 
 				// Send request
@@ -290,12 +305,11 @@ module.exports = {
 					choices: this.choicesChannelLayout(),
 					default: this.firstId(this.choicesChannelLayout()),
 				},
-				{
-					id: 'destination',
-					type: 'custom-variable',
-					label: 'Destination Variable',
-				},
 			],
+			// module-base 2.x: the 'custom-variable' option is deprecated, the action returns the layout data
+			// as result instead and the user chooses in Companion where to store it. Existing buttons are
+			// converted by an upgrade script (see upgrades.js).
+			hasResult: true,
 			callback: async (action) => {
 				if (
 					typeof action.options.channelIdlayoutId !== 'string' ||
@@ -303,9 +317,10 @@ module.exports = {
 				) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Channel and layout are not known! Please review your button config'
+						'Channel and layout are not known! Please review your button config',
 					)
-					this.debug('channelIdlayoutId: ' + action.options.channelIdlayoutId)
+					// Fix: InstanceBase has no debug() method, use log()
+					this.log('debug', 'channelIdlayoutId: ' + action.options.channelIdlayoutId)
 					return
 				}
 
@@ -313,7 +328,7 @@ module.exports = {
 				if (!this.state.channels[channelId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing channel! Please review your button config'
+						'Action on non existing channel! Please review your button config',
 					)
 					this.log('error', 'Action on non existing channel: ' + channelId)
 					return
@@ -321,7 +336,7 @@ module.exports = {
 				if (!this.state.channels[channelId].layouts[layoutId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing layout! Please review your button config'
+						'Action on non existing layout! Please review your button config',
 					)
 					this.log('error', 'Action on non existing layout ' + layoutId + ' on channel ' + channelId)
 					return
@@ -333,9 +348,9 @@ module.exports = {
 					const layoutData = JSON.stringify(await this.sendRequest('GET', url, {}))
 					this.log(
 						'debug',
-						`Layout Data retrieved for Channel ${this.state.channels[channelId].name}, Layout ${this.state.channels[channelId].layouts[layoutId].name}:\n${layoutData}`
+						`Layout Data retrieved for Channel ${this.state.channels[channelId].name}, Layout ${this.state.channels[channelId].layouts[layoutId].name}:\n${layoutData}`,
 					)
-					this.setCustomVariableValue(action.options.destination, layoutData)
+					return layoutData
 				} catch (error) {
 					this.log('error', 'Layout data could not be retrieved or stored')
 				}
@@ -368,9 +383,10 @@ module.exports = {
 				) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Channel and layout are not known! Please review your button config'
+						'Channel and layout are not known! Please review your button config',
 					)
-					this.debug('channelIdlayoutId: ' + action.options.channelIdlayoutId)
+					// Fix: InstanceBase has no debug() method, use log()
+					this.log('debug', 'channelIdlayoutId: ' + action.options.channelIdlayoutId)
 					return
 				}
 
@@ -378,7 +394,7 @@ module.exports = {
 				if (!this.state.channels[channelId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing channel! Please review your button config'
+						'Action on non existing channel! Please review your button config',
 					)
 					this.log('error', 'Action on non existing channel: ' + channelId)
 					return
@@ -386,7 +402,7 @@ module.exports = {
 				if (!this.state.channels[channelId].layouts[layoutId]) {
 					this.setStatus(
 						InstanceStatus.UnknownWarning,
-						'Action on non existing layout! Please review your button config'
+						'Action on non existing layout! Please review your button config',
 					)
 					this.log('error', 'Action on non existing layout ' + layoutId + ' on channel ' + channelId)
 					return
@@ -396,7 +412,8 @@ module.exports = {
 				const url = '/api/channels/' + channelId + '/layouts/' + layoutId + '/settings'
 				let body = {}
 				try {
-					body = JSON.parse(await this.parseVariablesInString(action.options.source))
+					// module-base 2.x: Companion already replaced the variables in options with useVariables
+					body = JSON.parse(action.options.source)
 				} catch (error) {
 					this.log('error', 'Option is no valid JSON')
 					return
@@ -413,7 +430,10 @@ module.exports = {
 			name: 'Reboot system',
 			options: [],
 			callback: () => {
-				this.sendRequest('post', '/api/system/control/reboot', {})
+				// Fix: catch request errors to avoid an unhandled promise rejection
+				this.sendRequest('post', '/api/system/control/reboot', {}).catch((error) =>
+					this.log('error', 'System reboot failed: ' + error.message),
+				)
 			},
 		}
 
@@ -421,7 +441,10 @@ module.exports = {
 			name: 'Shutdown system',
 			options: [],
 			callback: () => {
-				this.sendRequest('post', '/api/system/control/shutdown', {})
+				// Fix: catch request errors to avoid an unhandled promise rejection
+				this.sendRequest('post', '/api/system/control/shutdown', {}).catch((error) =>
+					this.log('error', 'System shutdown failed: ' + error.message),
+				)
 			},
 		}
 
@@ -481,9 +504,10 @@ module.exports = {
 				const channel = action.options.channel
 				const apiHost = this.config.host
 				const apiPort = this.config.host_port
-				const titleRaw = await this.parseVariablesInString(action.options.title)
-				const authorRaw = await this.parseVariablesInString(action.options.author)
-				const prefixRaw = await this.parseVariablesInString(action.options.prefix)
+				// module-base 2.x: Companion already replaced the variables in options with useVariables
+				const titleRaw = action.options.title
+				const authorRaw = action.options.author
+				const prefixRaw = action.options.prefix
 				const urlObj = new URL(`http://${apiHost}:${apiPort}/admin/channel${channel}/set_params.cgi`)
 				urlObj.searchParams.set('title', titleRaw)
 				urlObj.searchParams.set('author', authorRaw)
@@ -495,6 +519,8 @@ module.exports = {
 				try {
 					await fetchFunc(url, {
 						method: 'GET',
+						// Fix: without a timeout the action never finishes if the device is unreachable
+						signal: AbortSignal.timeout(3000),
 						headers: {
 							Authorization:
 								'Basic ' +

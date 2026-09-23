@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Breaking
+
+- Updated to `@companion-module/base` 2.1 and the node22 runtime, the module now requires Companion 4.3 or newer
+- "Get layout data" returns the layout data as action result instead of writing it into a custom variable, existing actions are converted automatically
+
+### Bug Fixes
+
+- Module crashed on start for new connections without a configuration, so the config page was never shown
+- Changes of IP, credentials or API version in the configuration are applied without restarting the module
+- Old advanced streaming feedbacks were not converted to boolean feedbacks during upgrade
+- Requests had no working timeout, polls could pile up when the device was unreachable
+- A failing optional API v2.0 endpoint (e.g. AFU status) stopped all feedback updates
+- Failing actions caused unhandled promise rejections
+- Crashes when a recorder had no status or a layout was unknown
+- Error messages showed the request instead of the message from the Pearl
+- Presets had no name and presets of recorders with the same name overwrote each other
+
 ## [2.2.0] (2025-10-20)
 
 ### New Features

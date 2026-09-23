@@ -1,3 +1,6 @@
+const { CreateUseActionResultStoreUpgradeScript } = require('@companion-module/base')
+
+// Remember: once an upgrade script has been added, it must never be removed or reordered
 module.exports = [
 	// Set default values for new config options
 	function setDefaultConfig(context, props) {
@@ -8,6 +11,11 @@ module.exports = [
 		}
 
 		const changed = {}
+
+		// Fix: props.config is null when there is no config to upgrade
+		if (!props.config) {
+			return result
+		}
 
 		if (props.config.use_api_v2 === undefined) {
 			changed.use_api_v2 = true
@@ -48,4 +56,10 @@ module.exports = [
 
 		return result
 	},
+
+	// module-base 2.x: 'Get layout data' returns its result instead of writing into the custom variable
+	// selected in the 'destination' option. This converts existing actions to the new result flow.
+	CreateUseActionResultStoreUpgradeScript({
+		getLayoutData: 'destination',
+	}),
 ]
