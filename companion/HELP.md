@@ -1,6 +1,8 @@
 ## Epiphan Pearl Recorder/Streamer
 
-Should work with all Epiphan Pearl models and versions.
+Should work with all Epiphan Pearl models. Firmware 4.24.1 or newer is recommended: the module then uses the Pearl REST API v2.0 automatically. With older firmware the module uses the older API and shows a warning recommending a firmware update.
+
+If the Pearl is not reachable, the module retries the connection every 10 seconds.
 
 **Available commands**
 

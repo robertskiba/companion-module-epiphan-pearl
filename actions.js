@@ -67,7 +67,12 @@ module.exports = {
 
 				type = 'put'
 				url = '/api/channels/' + channelId + '/layouts/active'
-				body = { id: Number(layoutId) }
+				if (this.usesApiV2()) {
+					// API v2.0 expects the layout id as query parameter instead of a JSON body
+					url += '?id=' + encodeURIComponent(layoutId)
+				} else {
+					body = { id: Number(layoutId) }
+				}
 				callback = (response) => {
 					if (response && response.status === 'ok') {
 						// return the promise so a failing refresh is caught below
@@ -218,6 +223,7 @@ module.exports = {
 					return
 				}
 
+				const requestOptions = {}
 				let startStopAction = action.options.startStopAction
 				if (startStopAction === 3) {
 					// Toggle
@@ -234,6 +240,8 @@ module.exports = {
 					url = `/api/recorders/${recorderId}/control/start`
 				} else if (startStopAction === 2) {
 					url = `/api/recorders/${recorderId}/control/reset`
+					// API v2.0 has no reset command, so this always uses the v1 API
+					requestOptions.legacy = true
 				} else if (startStopAction === 99) {
 					return
 				} else {
@@ -253,7 +261,7 @@ module.exports = {
 				}
 				// Send request
 				// Fix: catch request errors to avoid an unhandled promise rejection
-				this.sendRequest(type, url, body)
+				this.sendRequest(type, url, body, requestOptions)
 					.then(callback)
 					.catch((error) => this.log('error', 'Recorder could not be controlled: ' + error.message))
 			},
@@ -282,16 +290,22 @@ module.exports = {
 				let type = 'post'
 				let url = `/api/channels/${action.options.channel}/bookmarks`
 				// module-base 2.x: Companion already replaced the variables in options with useVariables
-				let body = {
-					text: action.options.markertext,
+				const text = action.options.markertext
+				let body = {}
+				if (this.usesApiV2()) {
+					// API v2.0 expects the text as query parameter instead of a JSON body
+					url += '?text=' + encodeURIComponent(text)
+				} else {
+					body = { text }
 				}
 
 				// Send request
 				try {
 					await this.sendRequest(type, url, body)
-					this.log('info', 'marker successful sent: ' + body.text)
+					this.log('info', 'marker successful sent: ' + text)
 				} catch (error) {
-					this.log('error', 'marker could not be set')
+					// the reason matters here, e.g. the Pearl refuses markers if the channel is not recording
+					this.log('error', 'marker could not be set: ' + error.message)
 				}
 			},
 		}
@@ -345,7 +359,8 @@ module.exports = {
 				//get the data
 				const url = '/api/channels/' + channelId + '/layouts/' + layoutId + '/settings'
 				try {
-					const layoutData = JSON.stringify(await this.sendRequest('GET', url, {}))
+					// API v2.0 has no layout settings, so this always uses the v1 API
+					const layoutData = JSON.stringify(await this.sendRequest('GET', url, {}, { legacy: true }))
 					this.log(
 						'debug',
 						`Layout Data retrieved for Channel ${this.state.channels[channelId].name}, Layout ${this.state.channels[channelId].layouts[layoutId].name}:\n${layoutData}`,
@@ -419,7 +434,8 @@ module.exports = {
 					return
 				}
 				try {
-					await this.sendRequest('PUT', url, body)
+					// API v2.0 has no layout settings, so this always uses the v1 API
+					await this.sendRequest('PUT', url, body, { legacy: true })
 				} catch (error) {
 					this.log('error', 'Layout data could not be sent')
 				}
