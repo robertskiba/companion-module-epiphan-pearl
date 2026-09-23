@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Important
+
+- Requires Companion 4.3 or newer
+- The option "Use API v2.0" was removed. The module now automatically uses the best connection method for the firmware of your Pearl.
+- "Get layout data" no longer asks for a custom variable. Choose where to store the result directly in Companion, like for other actions that return a value. Existing buttons are converted automatically.
+
+### New Features
+
+- If your Pearl runs a firmware older than 4.24.1, the connection shows a warning recommending a firmware update
+- If the Pearl is not reachable, the module tries to reconnect every 10 seconds
+
+### Bug Fixes
+
+- The settings page did not open when adding a new Pearl connection
+- Changed settings (e.g. IP address or password) now take effect immediately, without restarting the connection
+- With firmware 4.24.1 or newer, layouts were missing, and changing layouts, inserting markers, resetting recorders and getting or setting layout data did not work
+- Streaming feedbacks from very old configurations lost their colors after updating
+- Buttons and feedbacks could stop updating when the Pearl was not reachable or did not support a feature
+- Presets now have proper names, and recorders with the same name each get their own presets
+- Recorders without a name no longer show up as "undefined"
+- Clearer error messages, e.g. when a marker can't be set because the channel is not recording
+- Improved stability and error handling
+
 ## [2.2.0] (2025-10-20)
 
 ### New Features

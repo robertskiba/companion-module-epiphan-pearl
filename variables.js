@@ -151,7 +151,8 @@ module.exports = {
 			}
 		}
 
-		self.setVariableDefinitions(variables)
+		// module-base 2.x: variable definitions are an object keyed by the variable id instead of an array
+		self.setVariableDefinitions(Object.fromEntries(variables.map((v) => [v.variableId, { name: v.name }])))
 		self.setVariableValues(values)
 	},
 }

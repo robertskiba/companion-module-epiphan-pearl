@@ -4,7 +4,6 @@ const {
 	InstanceBase,
 	InstanceStatus,
 	Regex,
-	runEntrypoint,
 } = require('@companion-module/base')
 const http = require('http')
 
@@ -20,8 +19,12 @@ const presets = require('./presets')
 const { get_config_fields } = require('./config')
 const variables = require('./variables')
 const upgradeScripts = require('./upgrades')
-// Minimum firmware version (4.24.01) that supports API v2.0
-const MIN_API_V2_VERSION = 42401
+// Minimum firmware version that supports API v2.0, older firmware is controlled with the v1 API
+const MIN_API_V2_FIRMWARE = '4.24.1'
+// Timeout in ms for all HTTP requests to the device
+const REQUEST_TIMEOUT = 3000
+// Interval in ms to retry the connection while the device is not reachable
+const RECONNECT_INTERVAL = 10000
 
 /**
  * Companion instance class for the Epiphan Pearl.
@@ -88,7 +91,7 @@ class EpiphanPearl extends InstanceBase {
 	 * @since 1.0.0
 	 */
 	async destroy() {
-		clearInterval(this.timer)
+		this.stopPolling()
 		this.updateStatus(InstanceStatus.Disconnected)
 		this.log('debug', 'destroy', this.id)
 	}
@@ -104,71 +107,122 @@ class EpiphanPearl extends InstanceBase {
 	async init(config) {
 		this.updateStatus(InstanceStatus.Connecting)
 
+		// Fix: all the connection setup moved to configUpdated(), so it also runs when the user saves the
+		// config later. Before, a new connection without a config from a previous version crashed here
+		// (this.config was never set, determineApiBase() threw), so Companion never showed the config page.
 		await this.configUpdated(config)
-		await this.determineApiBase()
-		await this.dataPoller()
-		// fetch metadata for all channels once during init
-		for (const channelId of Object.keys(this.state.channels)) {
-			await this.fetchMetadata(channelId)
-		}
-		this.updateSystem()
-		this.initInterval()
 	}
 
 	// noinspection JSUnusedGlobalSymbols
 	/**
 	 * Process an updated configuration array.
+	 * (Re)starts the connection to the device with the new configuration.
 	 *
 	 * @access public
 	 * @since 1.0.0
 	 * @param {Object} config - the new configuration
 	 */
 	async configUpdated(config) {
-		if (!config.host || config.host.match(new RegExp(Regex.IP.slice(1, -1))) === null) {
-			this.log('error', 'invalid IP given in configuration: ' + config.host)
+		// Fix: always store the config, even an invalid one, so no method runs on an undefined config
+		this.config = config || {}
+
+		// stop polling the old device, the new configuration may point to a different one
+		this.stopPolling()
+		this.connectionFailed = false
+
+		if (!this.config.host || this.config.host.match(new RegExp(Regex.IP.slice(1, -1))) === null) {
+			this.updateStatus(InstanceStatus.BadConfig, 'Invalid IP address')
+			this.log('error', 'invalid IP given in configuration: ' + this.config.host)
+			// register the (empty) definitions anyway, so the module is usable once configured
+			this.updateSystem()
 			return
 		}
-		if (!config.host_port || parseInt(config.host_port) < 1 || parseInt(config.host_port) > 65536) {
-			this.log('error', 'invalid portnumber given in configuration: ' + config.host_port)
+		const port = parseInt(this.config.host_port)
+		if (!(port >= 1 && port <= 65535)) {
+			this.updateStatus(InstanceStatus.BadConfig, 'Invalid port number')
+			this.log('error', 'invalid portnumber given in configuration: ' + this.config.host_port)
+			this.updateSystem()
 			return
 		}
 
-		if (typeof config.pollfreq !== 'number') {
-			config.pollfreq = 10
-			this.saveConfig(config)
+		if (typeof this.config.pollfreq !== 'number') {
+			this.config.pollfreq = 10
+			// module-base 2.x: saveConfig() takes the secrets as second argument, this module has none
+			this.saveConfig(this.config, undefined)
 		}
 
-		if (this.config === undefined) {
-			// get config for the first time after init
-			this.config = config
+		// Fix: forget everything learned from the previous configuration (it may have been a different
+		// device) and redetect the API version, before this happened only once at startup
+		this.state = { channels: {}, recorders: {} }
+		this.metadata = {}
+		this.updateStatus(InstanceStatus.Connecting)
+		// the poller detects the API version first, and also fetches the metadata of all channels
+		this.apiDetected = false
+		await this.dataPoller()
+		this.updateSystem()
+		this.initInterval()
+	}
+
+	/**
+	 * Whether requests go to the API v2.0
+	 *
+	 * @returns {boolean}
+	 */
+	usesApiV2() {
+		return this.apiBasePath === '/api/v2.0'
+	}
+
+	/**
+	 * Compare two firmware versions like '4.24.1'
+	 *
+	 * @param {string} a
+	 * @param {string} b
+	 * @returns {number} negative if a is older than b, 0 if equal, positive if a is newer
+	 */
+	static compareFirmware(a, b) {
+		const pa = String(a)
+			.split('.')
+			.map((v) => parseInt(v, 10) || 0)
+		const pb = String(b)
+			.split('.')
+			.map((v) => parseInt(v, 10) || 0)
+		for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+			const diff = (pa[i] ?? 0) - (pb[i] ?? 0)
+			if (diff !== 0) return diff
+		}
+		return 0
+	}
+
+	/**
+	 * Set the connection status to OK, or to a warning if the firmware of the Pearl is outdated
+	 *
+	 * @private
+	 */
+	setOkStatus() {
+		if (this.firmwareWarning) {
+			this.updateStatus(InstanceStatus.UnknownWarning, this.firmwareWarning)
 		} else {
-			let oldconfig = { ...this.config }
-
-			this.config = config
-
-			if (oldconfig.pollfreq !== this.config.pollfreq) {
-				// polling frequency has changed, update interval
-				clearInterval(this.timer)
-				this.initInterval()
-			}
+			this.updateStatus(InstanceStatus.Ok)
 		}
 	}
 
 	/**
-	 * Determine which API version should be used based on firmware
+	 * Determine which API version should be used based on firmware.
+	 * API v2.0 is always used when the firmware supports it (the former config option was removed).
+	 * On older firmware the module falls back to the v1 API and recommends a firmware update.
 	 */
 	async determineApiBase() {
 		this.apiBasePath = '/api'
-		if (!this.config.use_api_v2) {
-			return
-		}
+		this.firmwareWarning = undefined
+		this.apiDetected = false
 		const apiHost = this.config.host
 		const apiPort = this.config.host_port
 		const url = `http://${apiHost}:${apiPort}/api/v2.0/system/firmware/version`
 		try {
 			const response = await fetchFunc(url, {
 				method: 'GET',
-				timeout: 3000,
+				// Fix: fetch() ignores a 'timeout' option, an AbortSignal is needed for a real timeout
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT),
 				headers: {
 					Authorization:
 						'Basic ' + Buffer.from(this.config.username + ':' + this.config.password).toString('base64'),
@@ -176,17 +230,28 @@ class EpiphanPearl extends InstanceBase {
 			})
 			if (response.ok) {
 				const data = await response.json()
-				const version = data.result || data
-				const parts = version.split('.').map((v) => parseInt(v, 10))
-				const verNum = parts[0] * 10000 + parts[1] * 100 + parts[2]
-				if (verNum >= MIN_API_V2_VERSION) {
+				const version = String(data.result || data)
+				this.apiDetected = true
+				if (EpiphanPearl.compareFirmware(version, MIN_API_V2_FIRMWARE) >= 0) {
 					this.apiBasePath = '/api/v2.0'
+				} else {
+					this.firmwareWarning = `Pearl firmware ${version} is older than ${MIN_API_V2_FIRMWARE}. Please update the Pearl to the latest firmware to use all features of this module.`
 				}
+			} else if (response.status === 404) {
+				// firmware without API v2.0, the exact version can't be read with the v1 API
+				this.apiDetected = true
+				this.firmwareWarning = `Pearl firmware is older than ${MIN_API_V2_FIRMWARE}. Please update the Pearl to the latest firmware to use all features of this module.`
+			} else {
+				this.log('warn', `Could not determine the firmware version: ${http.STATUS_CODES[response.status]}`)
 			}
 		} catch (e) {
+			// device not reachable, the detection is repeated with the next poll
 			if (this.config.verbose) {
-				this.log('debug', 'API v2.0 check failed: ' + e.message)
+				this.log('debug', 'Firmware version check failed: ' + e.message)
 			}
+		}
+		if (this.firmwareWarning) {
+			this.log('warn', this.firmwareWarning)
 		}
 	}
 
@@ -217,11 +282,40 @@ class EpiphanPearl extends InstanceBase {
 	 */
 	async updateActiveChannelLayout(channelId) {
 		channelId = channelId.toString()
-		const layouts = await this.sendRequest('get', '/api/channels/' + channelId + '/layouts', {})
-		layouts.forEach((layout) => {
-			this.state.channels[channelId].layouts[layout.id].active = layout.active
-		})
+		if (this.usesApiV2()) {
+			// API v2.0 has no layout list, but reports the active layout of a channel
+			const channels = await this.sendRequest('get', '/api/channels?ids=' + channelId + '&active_layout=yes', {})
+			const channel = channels.find((c) => c.id === channelId)
+			if (this.state.channels[channelId] && channel?.active_layout) {
+				this.applyActiveLayout(this.state.channels[channelId], channel.active_layout)
+			}
+		} else {
+			const layouts = await this.sendRequest('get', '/api/channels/' + channelId + '/layouts', {})
+			layouts.forEach((layout) => {
+				// Fix: skip layouts which are not known yet (e.g. created on the device since the last poll)
+				const knownLayout = this.state.channels[channelId]?.layouts[layout.id]
+				if (knownLayout) knownLayout.active = layout.active
+			})
+		}
 		this.checkFeedbacks('channelLayout')
+	}
+
+	/**
+	 * INTERNAL: Mark the active layout reported by API v2.0 in the layouts of a channel
+	 * If the layout list could not be fetched (it is only available in the v1 API), at least the
+	 * active layout is added, so the feedback and variable for it still work.
+	 *
+	 * @private
+	 * @param {Object} channelState - the channel in this.state
+	 * @param {{id: string, name: string}} activeLayout - the active_layout object from API v2.0
+	 */
+	applyActiveLayout(channelState, activeLayout) {
+		if (!channelState.layouts[activeLayout.id]) {
+			channelState.layouts[activeLayout.id] = { id: activeLayout.id, name: activeLayout.name }
+		}
+		for (const layout of Object.values(channelState.layouts)) {
+			layout.active = layout.id == activeLayout.id
+		}
 	}
 
 	/**
@@ -244,8 +338,10 @@ class EpiphanPearl extends InstanceBase {
 	 * @param {String} type - post, get, put
 	 * @param {String} url - Full URL to send request to
 	 * @param {?Object} body - Optional body to send
+	 * @param {Object} [options]
+	 * @param {boolean} [options.legacy=false] - always use the v1 API, for endpoints which don't exist in API v2.0
 	 */
-	async sendRequest(type, url, body = {}) {
+	async sendRequest(type, url, body = {}, { legacy = false } = {}) {
 		const apiHost = this.config.host,
 			apiPort = this.config.host_port,
 			baseUrl = 'http://' + apiHost + ':' + apiPort
@@ -269,7 +365,7 @@ class EpiphanPearl extends InstanceBase {
 		}
 
 		let apiUrl = url
-		if (url.startsWith('/api/')) {
+		if (url.startsWith('/api/') && !legacy) {
 			apiUrl = this.apiBasePath + url.slice(4)
 		}
 		const requestUrl = baseUrl + apiUrl
@@ -282,7 +378,8 @@ class EpiphanPearl extends InstanceBase {
 		try {
 			let options = {
 				method: type,
-				timeout: 3000,
+				// Fix: fetch() ignores a 'timeout' option, an AbortSignal is needed for a real timeout
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT),
 				headers: {
 					Authorization:
 						'Basic ' + Buffer.from(this.config.username + ':' + this.config.password).toString('base64'),
@@ -296,10 +393,11 @@ class EpiphanPearl extends InstanceBase {
 
 			response = await fetchFunc(requestUrl, options)
 		} catch (error) {
-			if (error.name === 'AbortError') {
+			// AbortSignal.timeout() rejects with a TimeoutError
+			if (error.name === 'AbortError' || error.name === 'TimeoutError') {
 				this.setStatus(
 					InstanceStatus.ConnectionFailure,
-					'Request was aborted: ' + requestUrl + ' reason: ' + error.message
+					'Request was aborted: ' + requestUrl + ' reason: ' + error.message,
 				)
 				this.log('debug', error.message)
 				throw new Error(error)
@@ -313,11 +411,11 @@ class EpiphanPearl extends InstanceBase {
 		if (!response.ok) {
 			this.setStatus(
 				InstanceStatus.ConnectionFailure,
-				'Non-successful response status code: ' + http.STATUS_CODES[response.status] + ' ' + requestUrl
+				'Non-successful response status code: ' + http.STATUS_CODES[response.status] + ' ' + requestUrl,
 			)
 			this.log(
 				'debug',
-				'Non-successful response status code: ' + http.STATUS_CODES[response.status] + ' ' + requestUrl
+				'Non-successful response status code: ' + http.STATUS_CODES[response.status] + ' ' + requestUrl,
 			)
 			throw new Error('Non-successful response status code: ' + http.STATUS_CODES[response.status])
 		}
@@ -327,26 +425,15 @@ class EpiphanPearl extends InstanceBase {
 			this.log('debug', `Response ${JSON.stringify(responseBody)}`)
 		}
 		if (responseBody && responseBody.status && responseBody.status !== 'ok') {
-			this.setStatus(
-				InstanceStatus.ConnectionFailure,
+			// Fix: the error message is in the response from the Pearl, not in the request body we sent
+			const errorMessage =
 				'Non-successful response from pearl: ' +
-					requestUrl +
-					' - ' +
-					(body.message ? body.message : 'No error message')
-			)
-			this.log(
-				'debug',
-				'Non-successful response from pearl: ' +
-					requestUrl +
-					' - ' +
-					(body.message ? body.message : 'No error message')
-			)
-			throw new Error(
-				'Non-successful response from pearl: ' +
-					requestUrl +
-					' - ' +
-					(body.message ? body.message : 'No error message')
-			)
+				requestUrl +
+				' - ' +
+				(responseBody.message ? responseBody.message : 'No error message')
+			this.setStatus(InstanceStatus.ConnectionFailure, errorMessage)
+			this.log('debug', errorMessage)
+			throw new Error(errorMessage)
 		}
 
 		let result = responseBody
@@ -354,7 +441,8 @@ class EpiphanPearl extends InstanceBase {
 			result = responseBody.result
 		}
 
-		this.setStatus(InstanceStatus.Ok)
+		// keeps the firmware update recommendation visible instead of overwriting it with OK
+		this.setOkStatus()
 		return result
 	}
 
@@ -375,18 +463,75 @@ class EpiphanPearl extends InstanceBase {
 	 * @since [Unreleased]
 	 */
 	updatePresets() {
-		this.setPresetDefinitions(this.getPresets())
+		// module-base 2.x: presets are passed together with their section structure
+		const { structure, presets } = this.getPresets()
+		this.setPresetDefinitions(structure, presets)
 	}
 
 	/**
-	 * INTERNAL: initialize interval data poller.
+	 * INTERNAL: initialize the data poller.
 	 * Polling data such as channels, recorders, layouts
 	 *
 	 * @private
 	 * @since 1.0.0
 	 */
 	initInterval() {
-		this.timer = setInterval(this.dataPoller.bind(this), Math.ceil(this.config.pollfreq * 1000) || 10000)
+		this.stopPolling()
+		this.scheduleNextPoll()
+	}
+
+	/**
+	 * INTERNAL: stop the data poller, also a poll which is currently running won't schedule the next one
+	 *
+	 * @private
+	 */
+	stopPolling() {
+		clearTimeout(this.timer)
+		this.timer = undefined
+		this.pollGeneration = (this.pollGeneration ?? 0) + 1
+	}
+
+	/**
+	 * INTERNAL: schedule the next poll.
+	 * Polls normally run with the configured polling frequency. While the connection to the Pearl is
+	 * failing, the connection is retried every 10 seconds instead.
+	 *
+	 * @private
+	 */
+	scheduleNextPoll() {
+		const generation = this.pollGeneration
+		const delay = this.connectionFailed
+			? RECONNECT_INTERVAL
+			: Math.ceil(this.config.pollfreq * 1000) || RECONNECT_INTERVAL
+		this.timer = setTimeout(async () => {
+			await this.dataPoller()
+			// don't continue if the poller was stopped or restarted in the meantime
+			if (generation === this.pollGeneration) {
+				this.scheduleNextPoll()
+			}
+		}, delay)
+	}
+
+	/**
+	 * INTERNAL: Run the data poller, but never twice at the same time.
+	 * Fix: slow answers from the device led to overlapping polls which overwrote each other's state.
+	 * Errors are caught here, because an exception inside the timer callback would be an unhandled
+	 * promise rejection.
+	 *
+	 * @private
+	 */
+	async dataPoller() {
+		if (this.pollRunning) {
+			return
+		}
+		this.pollRunning = true
+		try {
+			await this.pollData()
+		} catch (error) {
+			this.log('error', 'Polling failed: ' + error.message)
+		} finally {
+			this.pollRunning = false
+		}
 	}
 
 	/**
@@ -397,7 +542,13 @@ class EpiphanPearl extends InstanceBase {
 	 * @private
 	 * @since 1.0.0
 	 */
-	async dataPoller() {
+	async pollData() {
+		// Fix: if the Pearl was not reachable when the module started, the API version was never
+		// detected and the module stayed on the v1 API, so the detection is repeated until it succeeds
+		if (!this.apiDetected) {
+			await this.determineApiBase()
+		}
+
 		const state = {
 			channels: {},
 			recorders: {},
@@ -405,25 +556,46 @@ class EpiphanPearl extends InstanceBase {
 
 		// Get all channels and recorders available (in parallel)
 		let channels, recorders, recorders_status, systemStatus, firmware, identity, afu
+		// Fix: the optional v2.0 endpoints are requested separately with allSettled. Before, they were part
+		// of the Promise.all below, so one failing optional endpoint (e.g. afu/status without Automatic
+		// File Upload configured) made the whole poll fail and no feedback was updated anymore.
+		const optionalRequests = this.usesApiV2()
+			? Promise.allSettled([
+					this.sendRequest('get', '/api/system/status', {}),
+					this.sendRequest('get', '/api/system/firmware', {}),
+					this.sendRequest('get', '/api/system/ident', {}),
+					this.sendRequest('get', '/api/afu/status', {}),
+				])
+			: Promise.resolve([])
 		try {
-			const requests = [
-				this.sendRequest('get', '/api/channels?publishers=yes&encoders=yes', {}),
+			;[channels, recorders, recorders_status] = await Promise.all([
+				// API v2.0 reports the active layout of each channel with the channel list
+				this.sendRequest(
+					'get',
+					'/api/channels?publishers=yes&encoders=yes' + (this.usesApiV2() ? '&active_layout=yes' : ''),
+					{},
+				),
 				this.sendRequest('get', '/api/recorders', {}),
 				this.sendRequest('get', '/api/recorders/status', {}),
-			]
-			if (this.apiBasePath === '/api/v2.0') {
-				requests.push(this.sendRequest('get', '/api/system/status', {}))
-				requests.push(this.sendRequest('get', '/api/system/firmware', {}))
-				requests.push(this.sendRequest('get', '/api/system/ident', {}))
-				requests.push(this.sendRequest('get', '/api/afu/status', {}))
-			}
-			;[channels, recorders, recorders_status, systemStatus, firmware, identity, afu] = await Promise.all(
-				requests
-			)
+			])
 		} catch (error) {
-			this.log('error', 'No valid answer from device')
+			// log only when the connection gets lost, not on every retry
+			if (!this.connectionFailed) {
+				this.log(
+					'error',
+					`No valid answer from device (${error.message}), retrying every ${RECONNECT_INTERVAL / 1000} seconds`,
+				)
+			}
+			this.connectionFailed = true
 			return
 		}
+		if (this.connectionFailed) {
+			this.log('info', 'Connection to the Pearl restored')
+			this.connectionFailed = false
+		}
+		;[systemStatus, firmware, identity, afu] = (await optionalRequests).map((res) =>
+			res.status === 'fulfilled' ? res.value : undefined,
+		)
 
 		channels.forEach((channel) => {
 			state.channels[channel.id] = { ...channel }
@@ -448,7 +620,13 @@ class EpiphanPearl extends InstanceBase {
 		// Get all layouts and publishers for all channels and all recorder states (in parallel)
 		await Promise.allSettled([
 			...channels.map(async (channel) => {
-				const layouts = await this.sendRequest('get', '/api/channels/' + channel.id + '/layouts', {})
+				// API v2.0 has no endpoint to list the layouts of a channel, so this always uses the v1 API
+				const layouts = await this.sendRequest(
+					'get',
+					'/api/channels/' + channel.id + '/layouts',
+					{},
+					{ legacy: true },
+				)
 				layouts.forEach((layout) => {
 					state.channels[channel.id].layouts[layout.id] = { ...layout }
 				})
@@ -467,7 +645,7 @@ class EpiphanPearl extends InstanceBase {
 				const publishersstatus = await this.sendRequest(
 					'get',
 					'/api/channels/' + channel.id + '/publishers/status',
-					{}
+					{},
 				)
 				publishersstatus.forEach((publisher) => {
 					if (state.channels[channel.id].publishers[publisher.id] === undefined)
@@ -476,6 +654,14 @@ class EpiphanPearl extends InstanceBase {
 				})
 			}),
 		])
+
+		// In API v2.0 the active layout comes with the channel list and is more reliable than the
+		// v1 layout list, which may not be available on newer firmware
+		for (const channel of channels) {
+			if (channel.active_layout) {
+				this.applyActiveLayout(state.channels[channel.id], channel.active_layout)
+			}
+		}
 
 		// now that we have an updated state object, let's see where we have to react
 
@@ -502,16 +688,16 @@ class EpiphanPearl extends InstanceBase {
 			channelIds.reduce(
 				(acc, curr) =>
 					`${acc},${Object.keys(state.channels[curr].publishers).map(
-						(id) => state.channels[curr].publishers[id].name
+						(id) => state.channels[curr].publishers[id].name,
 					)}`,
-				''
+				'',
 			) !==
 			channelIds.reduce(
 				(acc, curr) =>
 					`${acc},${Object.keys(this.state.channels[curr].publishers).map(
-						(id) => this.state.channels[curr].publishers[id].name
+						(id) => this.state.channels[curr].publishers[id].name,
 					)}`,
-				''
+				'',
 			)
 		) {
 			updateNeeded = true
@@ -519,16 +705,16 @@ class EpiphanPearl extends InstanceBase {
 			channelIds.reduce(
 				(acc, curr) =>
 					`${acc},${Object.keys(state.channels[curr].layouts).map(
-						(id) => state.channels[curr].layouts[id].name
+						(id) => state.channels[curr].layouts[id].name,
 					)}`,
-				''
+				'',
 			) !==
 			channelIds.reduce(
 				(acc, curr) =>
 					`${acc},${Object.keys(this.state.channels[curr].layouts).map(
-						(id) => this.state.channels[curr].layouts[id].name
+						(id) => this.state.channels[curr].layouts[id].name,
 					)}`,
-				''
+				'',
 			)
 		) {
 			updateNeeded = true
@@ -543,16 +729,16 @@ class EpiphanPearl extends InstanceBase {
 				channelIds.reduce(
 					(acc, curr) =>
 						`${acc},${Object.keys(state.channels[curr].layouts).map(
-							(id) => state.channels[curr].layouts[id].active
+							(id) => state.channels[curr].layouts[id].active,
 						)}`,
-					''
+					'',
 				) !==
 				channelIds.reduce(
 					(acc, curr) =>
 						`${acc},${Object.keys(this.state.channels[curr].layouts).map(
-							(id) => this.state.channels[curr].layouts[id].active
+							(id) => this.state.channels[curr].layouts[id].active,
 						)}`,
-					''
+					'',
 				)
 			) {
 				feedbacksToCheck.push('channelLayout')
@@ -561,16 +747,16 @@ class EpiphanPearl extends InstanceBase {
 				channelIds.reduce(
 					(acc, curr) =>
 						`${acc},${Object.keys(state.channels[curr].layouts).map(
-							(id) => state.channels[curr].layouts[id].active
+							(id) => state.channels[curr].layouts[id].active,
 						)}`,
-					''
+					'',
 				) !==
 				channelIds.reduce(
 					(acc, curr) =>
 						`${acc},${Object.keys(this.state.channels[curr].layouts).map(
-							(id) => this.state.channels[curr].layouts[id].active
+							(id) => this.state.channels[curr].layouts[id].active,
 						)}`,
-					''
+					'',
 				)
 			) {
 				feedbacksToCheck.push('channelLayout')
@@ -579,28 +765,30 @@ class EpiphanPearl extends InstanceBase {
 				channelIds.reduce(
 					(acc, curr) =>
 						`${acc},${Object.keys(state.channels[curr].publishers).map((id) =>
-							JSON.stringify(state.channels[curr].publishers[id].status)
+							JSON.stringify(state.channels[curr].publishers[id].status),
 						)}`,
-					''
+					'',
 				) !==
 				channelIds.reduce(
 					(acc, curr) =>
 						`${acc},${Object.keys(this.state.channels[curr].publishers).map((id) =>
-							JSON.stringify(this.state.channels[curr].publishers[id].status)
+							JSON.stringify(this.state.channels[curr].publishers[id].status),
 						)}`,
-					''
+					'',
 				)
 			) {
 				feedbacksToCheck.push('streamingState')
 			}
+			// Fix: a recorder can be listed in /recorders without an entry in /recorders/status,
+			// so status may be undefined
 			if (
 				recorderIds.reduce(
-					(acc, curr) => `${acc},${JSON.stringify(state.recorders[curr].status.state)}`,
-					''
+					(acc, curr) => `${acc},${JSON.stringify(state.recorders[curr].status?.state)}`,
+					'',
 				) !==
 				recorderIds.reduce(
-					(acc, curr) => `${acc},${JSON.stringify(this.state.recorders[curr].status.state)}`,
-					''
+					(acc, curr) => `${acc},${JSON.stringify(this.state.recorders[curr].status?.state)}`,
+					'',
 				)
 			) {
 				feedbacksToCheck.push('recorderRecording')
@@ -647,7 +835,8 @@ class EpiphanPearl extends InstanceBase {
 	 */
 	choicesRecorders() {
 		return Object.keys(this.state.recorders).map((id) => {
-			return { id, label: this.state.recorders[id].name }
+			// Fix: recorders only listed in /recorders/status have no name, avoid 'undefined' labels
+			return { id, label: this.state.recorders[id].name ?? `Recorder ${id}` }
 		})
 	}
 
@@ -713,7 +902,11 @@ class EpiphanPearl extends InstanceBase {
 		}
 
 		for (const recorder of recoders) {
-			this.state.recorders[recorder.id].status = recorder.status
+			// Fix: /recorders/status can contain ids which are not in the recorder list (see doc/requests),
+			// updating them crashed. Unknown recorders are picked up by the next regular poll.
+			if (this.state.recorders[recorder.id]) {
+				this.state.recorders[recorder.id].status = recorder.status
+			}
 		}
 
 		this.log('debug', 'Updating RECORDER_STATES and then call checkFeedbacks(recorderRecording)')
@@ -736,6 +929,8 @@ class EpiphanPearl extends InstanceBase {
 		try {
 			const response = await fetchFunc(url, {
 				method: 'GET',
+				// Fix: without a timeout an unreachable device blocks init and the poller
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT),
 				headers: {
 					Authorization:
 						'Basic ' + Buffer.from(this.config.username + ':' + this.config.password).toString('base64'),
@@ -764,12 +959,15 @@ class EpiphanPearl extends InstanceBase {
 	}
 }
 
+// This script runs before the rename in upgrades.js, so it must use the feedback ids as they were
+// before 2.2.0. Fix: 'streamingState' reverted to the original id 'channelStreaming', otherwise old
+// advanced streaming feedbacks are never converted to boolean feedbacks.
 const upgradeToBooleanFeedbacks = CreateConvertToBooleanFeedbackUpgradeScript({
 	channelLayout: {
 		fg: 'color',
 		bg: 'bgcolor',
 	},
-	streamingState: {
+	channelStreaming: {
 		fg: 'color',
 		bg: 'bgcolor',
 	},
@@ -779,4 +977,6 @@ const upgradeToBooleanFeedbacks = CreateConvertToBooleanFeedbackUpgradeScript({
 	},
 })
 
-runEntrypoint(EpiphanPearl, [upgradeToBooleanFeedbacks, ...upgradeScripts])
+// module-base 2.x: runEntrypoint() was removed, the module class and the upgrade scripts are exported instead
+module.exports = EpiphanPearl
+module.exports.UpgradeScripts = [upgradeToBooleanFeedbacks, ...upgradeScripts]
