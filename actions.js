@@ -1,5 +1,5 @@
 const { InstanceStatus } = require('@companion-module/base')
-const variables = require('./variables')
+const http = require('http')
 
 // use global fetch provided by Node 18+
 if (typeof global.fetch !== 'function') {
@@ -524,16 +524,25 @@ module.exports = {
 				const titleRaw = action.options.title
 				const authorRaw = action.options.author
 				const prefixRaw = action.options.prefix
-				const urlObj = new URL(`http://${apiHost}:${apiPort}/admin/channel${channel}/set_params.cgi`)
-				urlObj.searchParams.set('title', titleRaw)
-				urlObj.searchParams.set('author', authorRaw)
-				urlObj.searchParams.set('rec_prefix', prefixRaw)
-				const url = urlObj.toString()
+				// same validation as when reading the metadata, the channel id becomes part of the URL path
+				if (!/^[a-zA-Z0-9_-]+$/.test(String(channel))) {
+					this.log('error', `Invalid channel: ${channel}`)
+					return
+				}
+				// encodeURIComponent encodes spaces as %20, which every CGI understands, unlike the '+' of URLSearchParams
+				const query = [
+					['title', titleRaw],
+					['author', authorRaw],
+					['rec_prefix', prefixRaw],
+				]
+					.map(([key, value]) => `${key}=${encodeURIComponent(value ?? '')}`)
+					.join('&')
+				const url = `http://${apiHost}:${apiPort}/admin/channel${channel}/set_params.cgi?${query}`
 				if (this.config.verbose) {
 					this.log('debug', `Action set metadata for channel ${channel}`)
 				}
 				try {
-					await fetchFunc(url, {
+					const response = await fetchFunc(url, {
 						method: 'GET',
 						// Fix: without a timeout the action never finishes if the device is unreachable
 						signal: AbortSignal.timeout(3000),
@@ -543,13 +552,14 @@ module.exports = {
 								Buffer.from(this.config.username + ':' + this.config.password).toString('base64'),
 						},
 					})
-					if (!this.metadata[channel]) this.metadata[channel] = {}
-					this.metadata[channel].title = titleRaw
-					this.metadata[channel].author = authorRaw
-					this.metadata[channel].rec_prefix = prefixRaw
-					variables.updateVariables(this)
+					// Fix: the values were stored locally even if the Pearl rejected them
+					if (!response.ok) {
+						throw new Error(http.STATUS_CODES[response.status])
+					}
+					// read the values back, so the variables show what the Pearl actually stored
+					await this.fetchMetadata(channel)
 				} catch (e) {
-					this.log('error', 'Failed to set metadata')
+					this.log('error', 'Failed to set metadata: ' + e.message)
 				}
 			},
 		}

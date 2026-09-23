@@ -130,9 +130,11 @@ class EpiphanPearl extends InstanceBase {
 		this.stopPolling()
 		this.connectionFailed = false
 
-		if (!this.config.host || this.config.host.match(new RegExp(Regex.IP.slice(1, -1))) === null) {
-			this.updateStatus(InstanceStatus.BadConfig, 'Invalid IP address')
-			this.log('error', 'invalid IP given in configuration: ' + this.config.host)
+		// hostnames are accepted as well as IP addresses (the hostname pattern also matches IPv4 addresses)
+		if (typeof this.config.host === 'string') this.config.host = this.config.host.trim()
+		if (!this.config.host || this.config.host.match(new RegExp(Regex.HOSTNAME.slice(1, -1))) === null) {
+			this.updateStatus(InstanceStatus.BadConfig, 'Invalid IP address or hostname')
+			this.log('error', 'invalid IP address or hostname given in configuration: ' + this.config.host)
 			// register the (empty) definitions anyway, so the module is usable once configured
 			this.updateSystem()
 			return
@@ -393,6 +395,9 @@ class EpiphanPearl extends InstanceBase {
 
 			response = await fetchFunc(requestUrl, options)
 		} catch (error) {
+			// The connection status is only changed for real connection problems: network errors and
+			// timeouts here, a wrong password below. Error answers of the Pearl to a single request
+			// (e.g. "channel is not recording" for a marker) don't mean the connection is broken.
 			// AbortSignal.timeout() rejects with a TimeoutError
 			if (error.name === 'AbortError' || error.name === 'TimeoutError') {
 				this.setStatus(
@@ -408,16 +413,26 @@ class EpiphanPearl extends InstanceBase {
 			throw new Error(error)
 		}
 
+		if (response.status === 401) {
+			this.setStatus(InstanceStatus.AuthenticationFailure, 'Wrong username or password')
+			this.log('debug', 'Authentication failed: ' + requestUrl)
+			const error = new Error('Wrong username or password')
+			error.authenticationFailed = true
+			throw error
+		}
+
 		if (!response.ok) {
-			this.setStatus(
-				InstanceStatus.ConnectionFailure,
-				'Non-successful response status code: ' + http.STATUS_CODES[response.status] + ' ' + requestUrl,
-			)
 			this.log(
 				'debug',
 				'Non-successful response status code: ' + http.STATUS_CODES[response.status] + ' ' + requestUrl,
 			)
-			throw new Error('Non-successful response status code: ' + http.STATUS_CODES[response.status])
+			// the Pearl explains most errors in the JSON body, e.g. why a marker can't be set
+			const errorBody = await response.json().catch(() => undefined)
+			throw new Error(
+				'Non-successful response status code: ' +
+					http.STATUS_CODES[response.status] +
+					(errorBody?.message ? ' - ' + errorBody.message : ''),
+			)
 		}
 
 		const responseBody = await response.json()
@@ -431,7 +446,6 @@ class EpiphanPearl extends InstanceBase {
 				requestUrl +
 				' - ' +
 				(responseBody.message ? responseBody.message : 'No error message')
-			this.setStatus(InstanceStatus.ConnectionFailure, errorMessage)
 			this.log('debug', errorMessage)
 			throw new Error(errorMessage)
 		}
@@ -555,7 +569,7 @@ class EpiphanPearl extends InstanceBase {
 		} // start with a fresh object, during the update some properties will be unavailable, so it is best to not do live updates
 
 		// Get all channels and recorders available (in parallel)
-		let channels, recorders, recorders_status, systemStatus, firmware, identity, afu
+		let channels, recorders, recorders_status, systemStatus, firmware, identity, afu, encoderStatus
 		// Fix: the optional v2.0 endpoints are requested separately with allSettled. Before, they were part
 		// of the Promise.all below, so one failing optional endpoint (e.g. afu/status without Automatic
 		// File Upload configured) made the whole poll fail and no feedback was updated anymore.
@@ -566,19 +580,34 @@ class EpiphanPearl extends InstanceBase {
 					this.sendRequest('get', '/api/system/ident', {}),
 					this.sendRequest('get', '/api/afu/status', {}),
 				])
-			: Promise.resolve([])
-		try {
-			;[channels, recorders, recorders_status] = await Promise.all([
-				// API v2.0 reports the active layout of each channel with the channel list
-				this.sendRequest(
-					'get',
-					'/api/channels?publishers=yes&encoders=yes' + (this.usesApiV2() ? '&active_layout=yes' : ''),
-					{},
-				),
-				this.sendRequest('get', '/api/recorders', {}),
-				this.sendRequest('get', '/api/recorders/status', {}),
-			])
-		} catch (error) {
+			: Promise.allSettled([
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					// the v1 API reports resolution and bitrate of the encoders only in the channel status
+					this.sendRequest('get', '/api/channels/status?encoders=yes', {}),
+				])
+		// wait for all requests before deciding, otherwise a late successful answer could set the status
+		// back to OK after the poll already failed
+		const mainResults = await Promise.allSettled([
+			// API v2.0 reports the active layout of each channel with the channel list
+			this.sendRequest(
+				'get',
+				'/api/channels?publishers=yes&encoders=yes' + (this.usesApiV2() ? '&active_layout=yes' : ''),
+				{},
+			),
+			this.sendRequest('get', '/api/recorders', {}),
+			this.sendRequest('get', '/api/recorders/status', {}),
+		])
+		const optionalResults = await optionalRequests
+		const failed = mainResults.find((res) => res.status === 'rejected')
+		if (failed) {
+			const error = failed.reason
+			// a wrong password already set its own status, everything else means no usable connection
+			if (!error.authenticationFailed) {
+				this.setStatus(InstanceStatus.ConnectionFailure, 'No valid answer from device: ' + error.message)
+			}
 			// log only when the connection gets lost, not on every retry
 			if (!this.connectionFailed) {
 				this.log(
@@ -589,11 +618,12 @@ class EpiphanPearl extends InstanceBase {
 			this.connectionFailed = true
 			return
 		}
+		;[channels, recorders, recorders_status] = mainResults.map((res) => res.value)
 		if (this.connectionFailed) {
 			this.log('info', 'Connection to the Pearl restored')
 			this.connectionFailed = false
 		}
-		;[systemStatus, firmware, identity, afu] = (await optionalRequests).map((res) =>
+		;[systemStatus, firmware, identity, afu, encoderStatus] = optionalResults.map((res) =>
 			res.status === 'fulfilled' ? res.value : undefined,
 		)
 
@@ -602,6 +632,21 @@ class EpiphanPearl extends InstanceBase {
 			state.channels[channel.id].layouts = {}
 			state.channels[channel.id].publishers = {}
 		})
+
+		// v1 API: add the encoder status (resolution, bitrate) to the encoders of each channel
+		if (Array.isArray(encoderStatus)) {
+			for (const channelStatus of encoderStatus) {
+				const channelState = state.channels[channelStatus.id]
+				if (!channelState || !Array.isArray(channelStatus.encoders)) continue
+				const encoders = Array.isArray(channelState.encoders) ? [...channelState.encoders] : []
+				for (const encoder of channelStatus.encoders) {
+					const index = encoders.findIndex((e) => e.id === encoder.id)
+					if (index >= 0) encoders[index] = { ...encoders[index], status: encoder.status }
+					else encoders.push({ ...encoder })
+				}
+				channelState.encoders = encoders
+			}
+		}
 
 		recorders.forEach((recorder) => {
 			state.recorders[recorder.id] = { ...recorder }
@@ -936,25 +981,35 @@ class EpiphanPearl extends InstanceBase {
 						'Basic ' + Buffer.from(this.config.username + ':' + this.config.password).toString('base64'),
 				},
 			})
+			// Fix: an error page (e.g. wrong password) was parsed as metadata before
+			if (!response.ok) {
+				throw new Error(http.STATUS_CODES[response.status])
+			}
 			const text = await response.text()
 			if (this.config.verbose) {
 				this.log('debug', `Response ${text.trim()}`)
 			}
 			const lines = text.split('\n')
-			if (!this.metadata[channelId]) this.metadata[channelId] = {}
+			const metadata = {}
 			for (const line of lines) {
-				const [rawKey, rawVal] = line.split('=')
-				if (!rawKey) continue
-				const key = rawKey.trim()
-				const val = rawVal ? rawVal.trim() : ''
-				this.metadata[channelId][key] = val
+				// Fix: split at the first '=' only, values may contain '=' themselves
+				const separator = line.indexOf('=')
+				if (separator < 1) continue
+				metadata[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()
 			}
+			this.metadata[channelId] = metadata
+			this.metadataFailed?.delete(channelId)
 			if (this.config.verbose) {
 				this.log('debug', `Parsed Metadata ${JSON.stringify(this.metadata[channelId])}`)
 			}
 			variables.updateVariables(this)
 		} catch (e) {
-			this.log('error', 'Failed to get metadata')
+			// the poller retries this regularly, so a failure is logged only once per channel
+			this.metadataFailed = this.metadataFailed ?? new Set()
+			if (!this.metadataFailed.has(channelId)) {
+				this.metadataFailed.add(channelId)
+				this.log('error', `Failed to get metadata of channel ${channelId}: ${e.message}`)
+			}
 		}
 	}
 }
