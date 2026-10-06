@@ -38,7 +38,9 @@ module.exports = {
 					name: `Channel ${cid} Bitrate`,
 				})
 				values[`channel_${cid}_resolution`] = encStatus.resolution ?? videoEncoder.resolution ?? ''
-				values[`channel_${cid}_fps`] = encStatus.framerate ?? videoEncoder.framerate ?? ''
+				// the current values from the channel status come first ('fps' there), the encoder settings
+				// ('framerate') are only the fallback
+				values[`channel_${cid}_fps`] = encStatus.fps ?? encStatus.framerate ?? videoEncoder.framerate ?? ''
 				values[`channel_${cid}_bitrate`] = encStatus.bitrate ?? videoEncoder.bitrate ?? ''
 			}
 

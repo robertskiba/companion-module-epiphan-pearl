@@ -300,6 +300,8 @@ class EpiphanPearl extends InstanceBase {
 			})
 		}
 		this.checkFeedbacks('channelLayout')
+		// Fix: the variable of the active layout only changed with the next regular poll
+		variables.updateVariables(this)
 	}
 
 	/**
@@ -388,7 +390,10 @@ class EpiphanPearl extends InstanceBase {
 				},
 			}
 
-			if (type !== 'GET') {
+			// Fix: only send a JSON body if there is something to send. As soon as a request has a JSON
+			// body, the Pearl ignores the query parameters (checked on a Pearl-2 with 4.24.6), so API v2.0
+			// commands with query parameters (layout change, marker) failed with an empty body '{}'.
+			if (type !== 'GET' && body && Object.keys(body).length > 0) {
 				options.body = JSON.stringify(body)
 				options.headers['Content-Type'] = 'application/json'
 			}
@@ -573,21 +578,17 @@ class EpiphanPearl extends InstanceBase {
 		// Fix: the optional v2.0 endpoints are requested separately with allSettled. Before, they were part
 		// of the Promise.all below, so one failing optional endpoint (e.g. afu/status without Automatic
 		// File Upload configured) made the whole poll fail and no feedback was updated anymore.
-		const optionalRequests = this.usesApiV2()
-			? Promise.allSettled([
-					this.sendRequest('get', '/api/system/status', {}),
-					this.sendRequest('get', '/api/system/firmware', {}),
-					this.sendRequest('get', '/api/system/ident', {}),
-					this.sendRequest('get', '/api/afu/status', {}),
-				])
-			: Promise.allSettled([
-					undefined,
-					undefined,
-					undefined,
-					undefined,
-					// the v1 API reports resolution and bitrate of the encoders only in the channel status
-					this.sendRequest('get', '/api/channels/status?encoders=yes', {}),
-				])
+		const v2 = this.usesApiV2()
+		const optionalRequests = Promise.allSettled([
+			v2 ? this.sendRequest('get', '/api/system/status', {}) : undefined,
+			v2 ? this.sendRequest('get', '/api/system/firmware', {}) : undefined,
+			v2 ? this.sendRequest('get', '/api/system/ident', {}) : undefined,
+			v2 ? this.sendRequest('get', '/api/afu/status', {}) : undefined,
+			// The current encoder values (bitrate, fps) are only reported by the channel status of the v1
+			// API, also on firmware with API v2.0 (checked on a Pearl-2 with 4.24.6). API v2.0 only reports
+			// the encoder settings, where the bitrate is 0 when it is set to automatic.
+			this.sendRequest('get', '/api/channels/status?encoders=yes', {}, { legacy: true }),
+		])
 		// wait for all requests before deciding, otherwise a late successful answer could set the status
 		// back to OK after the poll already failed
 		const mainResults = await Promise.allSettled([
@@ -956,6 +957,67 @@ class EpiphanPearl extends InstanceBase {
 
 		this.log('debug', 'Updating RECORDER_STATES and then call checkFeedbacks(recorderRecording)')
 		this.checkFeedbacks('recorderRecording')
+		variables.updateVariables(this)
+	}
+
+	/**
+	 * INTERNAL: Update the status of the publishers (streams) of a channel
+	 *
+	 * @private
+	 * @param {string} channelId
+	 */
+	async updatePublisherStatus(channelId) {
+		const publishers = await this.sendRequest('get', '/api/channels/' + channelId + '/publishers/status', {})
+		const channel = this.state.channels[channelId]
+		if (!Array.isArray(publishers) || !channel) return
+		for (const publisher of publishers) {
+			if (channel.publishers[publisher.id]) {
+				channel.publishers[publisher.id].status = publisher.status
+			}
+		}
+		this.checkFeedbacks('streamingState')
+		variables.updateVariables(this)
+	}
+
+	/**
+	 * INTERNAL: After a start or stop command, ask for the new state until the Pearl reports it.
+	 * The Pearl executes start and stop in the background and reports 'starting' in between, so a
+	 * single request right after the command usually still returns the old state. Without this the
+	 * feedback only changed with the next regular poll, up to the polling frequency later.
+	 *
+	 * @private
+	 * @param {function(): Promise<void>} update - requests the current state
+	 * @param {function(): boolean} isSettled - whether the expected state has been reached
+	 */
+	async followUpState(update, isSettled) {
+		const generation = this.pollGeneration
+		// short steps first, most commands take one or two seconds; about 10 seconds in total, after
+		// that the regular poll takes over
+		for (const delay of [300, 500, 500, 500, 500, 1000, 1000, 2000, 2000, 2000]) {
+			await new Promise((resolve) => setTimeout(resolve, delay))
+			// stop when the connection was destroyed or restarted in the meantime
+			if (generation !== this.pollGeneration) return
+			try {
+				await update()
+			} catch (error) {
+				this.log('debug', 'State follow-up failed: ' + error.message)
+			}
+			if (isSettled()) return
+		}
+	}
+
+	/**
+	 * Whether a state reported by the Pearl matches the expected state of a start or stop command.
+	 * 'error' and 'disabled' are final too, waiting for them to change makes no sense.
+	 *
+	 * @param {string|undefined} state
+	 * @param {'start'|'stop'} command
+	 * @returns {boolean}
+	 */
+	static stateReached(state, command) {
+		if (state === 'error' || state === 'disabled') return true
+		// publishers of listener type (e.g. SRT listener) report 'listening' once they are started
+		return command === 'start' ? state === 'started' || state === 'listening' : state === 'stopped'
 	}
 
 	async fetchMetadata(channelId) {

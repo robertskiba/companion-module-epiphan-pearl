@@ -175,11 +175,28 @@ module.exports = {
 					url = '/api/channels/' + channelId + '/publishers/control/' + startStopAction
 				}
 
+				// the publishers whose state has to reach the target of the command
+				const publisherIds =
+					publisherId === 'all' ? Object.keys(this.state.channels[channelId].publishers) : [publisherId]
+				const command = startStopAction
+
 				// Send request
 				// Fix: catch request errors to avoid an unhandled promise rejection
-				this.sendRequest(type, url, body).catch((error) =>
-					this.log('error', 'Streaming could not be controlled: ' + error.message),
-				)
+				this.sendRequest(type, url, body)
+					.then(() =>
+						// Fix: the streaming feedback only changed with the next regular poll before
+						this.followUpState(
+							() => this.updatePublisherStatus(channelId),
+							() =>
+								publisherIds.every((id) =>
+									this.constructor.stateReached(
+										this.state.channels[channelId]?.publishers[id]?.status?.state,
+										command,
+									),
+								),
+						),
+					)
+					.catch((error) => this.log('error', 'Streaming could not be controlled: ' + error.message))
 			},
 		}
 
@@ -253,12 +270,19 @@ module.exports = {
 					return
 				}
 
-				callback = async (response) => {
-					if (response && response.status === 'ok') {
-						// return the promise so a failing refresh is caught below
-						return this.updateRecorderStatus()
-					}
-				}
+				// Fix: a single refresh right after the command usually still returned the old state, so
+				// the recording feedback only changed with the next regular poll. Now the state is asked
+				// for repeatedly until the Pearl reports it. A reset has no fixed target state, there it is
+				// enough that the recorder is no longer starting.
+				const command = startStopAction === 0 ? 'stop' : startStopAction === 1 ? 'start' : undefined
+				callback = () =>
+					this.followUpState(
+						() => this.updateRecorderStatus(),
+						() => {
+							const state = this.state.recorders[recorderId]?.status?.state
+							return command ? this.constructor.stateReached(state, command) : state !== 'starting'
+						},
+					)
 				// Send request
 				// Fix: catch request errors to avoid an unhandled promise rejection
 				this.sendRequest(type, url, body, requestOptions)

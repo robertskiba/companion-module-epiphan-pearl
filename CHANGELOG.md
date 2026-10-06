@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Buttons and feedbacks could stop updating when the Pearl was not reachable or did not support a feature
 - Presets now have proper names, and recorders with the same name each get their own presets
 - Recorders without a name no longer show up as "undefined"
+- The feedbacks for streaming and recording changed only with the next status query, up to the polling frequency after pressing the button. They now follow within about one to two seconds, and the variable of the active layout changes right away too.
+- The bitrate variable showed 0 instead of the current bitrate when the bitrate is set to automatic
 - The variables for resolution and bitrate stayed empty with firmware older than 4.24.1
 - "Set Content Metadata" updated the metadata variables even if the Pearl rejected the new values
 - The connection was shown as failed when the Pearl only rejected a single command, e.g. a marker
