@@ -4,6 +4,10 @@ Should work with all Epiphan Pearl models. Firmware 4.24.1 or newer is recommend
 
 If the Pearl is not reachable, the module retries the connection every 10 seconds.
 
+**Finding the Pearl on the network**
+
+If the Pearl can not be reached at the configured address, or no valid address is set, the module searches the network once for Pearls. Found devices are listed with model and serial number under **Found Pearl Devices** at the top of the connection settings, select one to use its address. The search covers the network around the configured address and the networks of the Companion computer, and takes up to about a minute; found Pearls appear as soon as they are found. No username or password is needed for the search.
+
 **Available commands**
 
 - Change channel layout

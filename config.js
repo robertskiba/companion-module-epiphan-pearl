@@ -6,10 +6,37 @@ const { Regex } = require('@companion-module/base')
  *
  * @access public
  * @since 1.0.0
+ * @param {{address: string, port: number, model: string, serial: string}[]} [foundDevices] - result
+ *   of the network scan, undefined as long as no scan has completed
  * @returns {Array} the config fields
  */
-const get_config_fields = () => {
+const get_config_fields = (foundDevices) => {
 	return [
+		// Shown as soon as a scan has completed, also without results, so "No Pearl found" is visible
+		// here and not only in the log. Selecting an entry applies its address, see configUpdated().
+		...(foundDevices !== undefined
+			? [
+					{
+						type: 'dropdown',
+						id: 'foundDevices',
+						label: 'Found Pearl Devices',
+						tooltip:
+							'Filled in automatically when the Pearl can not be reached: the module then searches the local network once for Pearls. Select an entry to use its address.',
+						width: 12,
+						default: '',
+						choices:
+							foundDevices.length > 0
+								? [
+										{ id: '', label: 'Select a found device...' },
+										...foundDevices.map((d) => ({
+											id: `${d.address}:${d.port}`,
+											label: `${d.address}${d.port !== 80 ? ':' + d.port : ''} (${[d.model, d.serial].filter(Boolean).join(' ')})`,
+										})),
+									]
+								: [{ id: '', label: 'No Pearl found' }],
+					},
+				]
+			: []),
 		{
 			type: 'textinput',
 			id: 'host',

@@ -19,6 +19,7 @@ const presets = require('./presets')
 const { get_config_fields } = require('./config')
 const variables = require('./variables')
 const upgradeScripts = require('./upgrades')
+const { scanForPearls } = require('./scan')
 // Minimum firmware version that supports API v2.0, older firmware is controlled with the v1 API
 const MIN_API_V2_FIRMWARE = '4.24.1'
 // Timeout in ms for all HTTP requests to the device
@@ -30,7 +31,7 @@ const RECONNECT_INTERVAL = 10000
  * Companion instance class for the Epiphan Pearl.
  *
  * @extends InstanceBase
- * @version 3.0.1
+ * @version 3.1.0
  * @since 1.0.0
  */
 class EpiphanPearl extends InstanceBase {
@@ -81,7 +82,7 @@ class EpiphanPearl extends InstanceBase {
 	 * @returns {Array} the config fields
 	 */
 	getConfigFields() {
-		return get_config_fields()
+		return get_config_fields(this.foundDevices)
 	}
 
 	/**
@@ -91,6 +92,7 @@ class EpiphanPearl extends InstanceBase {
 	 * @since 1.0.0
 	 */
 	async destroy() {
+		this.destroyed = true
 		this.stopPolling()
 		this.updateStatus(InstanceStatus.Disconnected)
 		this.log('debug', 'destroy', this.id)
@@ -126,9 +128,21 @@ class EpiphanPearl extends InstanceBase {
 		// Fix: always store the config, even an invalid one, so no method runs on an undefined config
 		this.config = config || {}
 
+		// Selecting an entry in "Found Pearl Devices" applies its address and resets the dropdown, it is
+		// a one-time "use this device", not a stored selection
+		if (this.config.foundDevices) {
+			const [foundHost, foundPort] = String(this.config.foundDevices).split(':')
+			this.config.host = foundHost
+			this.config.host_port = foundPort || '80'
+			this.config.foundDevices = ''
+			this.saveConfig(this.config, undefined)
+			this.log('info', `Using the found Pearl at ${foundHost}`)
+		}
+
 		// stop polling the old device, the new configuration may point to a different one
 		this.stopPolling()
 		this.connectionFailed = false
+		this.scannedSinceLastFailure = false
 
 		// hostnames are accepted as well as IP addresses (the hostname pattern also matches IPv4 addresses)
 		if (typeof this.config.host === 'string') this.config.host = this.config.host.trim()
@@ -137,6 +151,8 @@ class EpiphanPearl extends InstanceBase {
 			this.log('error', 'invalid IP address or hostname given in configuration: ' + this.config.host)
 			// register the (empty) definitions anyway, so the module is usable once configured
 			this.updateSystem()
+			// without a usable address, offer the Pearls on the network right away
+			this.triggerNetworkScan()
 			return
 		}
 		const port = parseInt(this.config.host_port)
@@ -618,6 +634,9 @@ class EpiphanPearl extends InstanceBase {
 				)
 			}
 			this.connectionFailed = true
+			// the Pearl may have a new address, search the network for it. Not after a wrong password:
+			// then the Pearl was reached at the configured address.
+			if (!error.authenticationFailed) this.triggerNetworkScan()
 			return
 		}
 		;[channels, recorders, recorders_status] = mainResults.map((res) => res.value)
@@ -625,6 +644,8 @@ class EpiphanPearl extends InstanceBase {
 			this.log('info', 'Connection to the Pearl restored')
 			this.connectionFailed = false
 		}
+		// the next connection failure may search the network again
+		this.scannedSinceLastFailure = false
 		;[systemStatus, firmware, identity, afu, encoderStatus, storages] = optionalResults.map((res) =>
 			res.status === 'fulfilled' ? res.value : undefined,
 		)
@@ -964,6 +985,46 @@ class EpiphanPearl extends InstanceBase {
 		this.log('debug', 'Updating RECORDER_STATES and then call checkFeedbacks(recorderRecording)')
 		this.checkFeedbacks('recorderRecording')
 		variables.updateVariables(this)
+	}
+
+	/**
+	 * INTERNAL: Search the network for Pearls and offer them in the config ("Found Pearl Devices").
+	 * Runs when the Pearl can not be reached or no valid address is configured, at most once per
+	 * connection failure (not on every 10 second retry) and never twice at the same time.
+	 *
+	 * @private
+	 */
+	triggerNetworkScan() {
+		if (this.scannedSinceLastFailure || this.scanRunning) return
+		this.scannedSinceLastFailure = true
+		this.scanRunning = true
+		this.log('info', 'Searching the network for Pearls...')
+		const ports = [...new Set([80, parseInt(this.config.host_port) || 80])]
+		const startedAt = Date.now()
+		scanForPearls({
+			configuredHost: this.config.host,
+			ports,
+			isCancelled: () => this.destroyed,
+			// offer found Pearls right away, searching all networks of this computer can take a while
+			onFound: (found) => {
+				if (!this.destroyed) this.foundDevices = found
+			},
+		})
+			.then((found) => {
+				if (this.destroyed) return
+				this.foundDevices = found
+				this.log(
+					'info',
+					found.length > 0
+						? `Network scan found ${found.length} Pearl(s): ${found.map((d) => `${d.address} (${d.model} ${d.serial})`.trim()).join(', ')} - see "Found Pearl Devices" in the connection settings`
+						: 'Network scan found no Pearl',
+				)
+				this.log('debug', `Network scan took ${Math.round((Date.now() - startedAt) / 1000)} s`)
+			})
+			.catch((error) => this.log('error', 'Network scan failed: ' + error.message))
+			.finally(() => {
+				this.scanRunning = false
+			})
 	}
 
 	/**
