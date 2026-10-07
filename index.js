@@ -30,7 +30,7 @@ const RECONNECT_INTERVAL = 10000
  * Companion instance class for the Epiphan Pearl.
  *
  * @extends InstanceBase
- * @version 2.2.0
+ * @version 3.0.0
  * @since 1.0.0
  */
 class EpiphanPearl extends InstanceBase {
