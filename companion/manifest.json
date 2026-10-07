@@ -32,5 +32,11 @@
 	},
 	"manufacturer": "Epiphan",
 	"products": ["Pearl"],
-	"keywords": ["Stream", "Encode", "Recording"]
+	"keywords": ["Stream", "Encode", "Recording"],
+	"bonjourQueries": {
+		"bonjourHost": {
+			"type": "epiphan",
+			"protocol": "tcp"
+		}
+	}
 }

@@ -6,7 +6,7 @@ If the Pearl is not reachable, the module retries the connection every 10 second
 
 **Finding the Pearl on the network**
 
-If the Pearl can not be reached at the configured address, or no valid address is set, the module searches the network once for Pearls. Found devices are listed with model and serial number under **Found Pearl Devices** at the top of the connection settings, select one to use its address. The search covers the network around the configured address and the networks of the Companion computer, and takes up to about a minute; found Pearls appear as soon as they are found. No username or password is needed for the search.
+Pearls in the same network as Companion are found automatically (Bonjour) and listed under **Pearl** in the connection settings with their device name. Select one and enter username and password. For a Pearl in another network, e.g. behind a router or VPN, select **Manual** and enter its IP address or hostname.
 
 **Available commands**
 

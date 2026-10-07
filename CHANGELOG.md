@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - If your Pearl runs a firmware older than 4.24.1, the connection shows a warning recommending a firmware update
 - If the Pearl is not reachable, the module tries to reconnect every 10 seconds
-- Pearls on the network are found automatically: if the Pearl can not be reached or no address is set, the module searches the network and lists the found Pearls with model and serial number under "Found Pearl Devices" in the connection settings. Selecting one applies its address.
+- Pearls in the same network are found automatically and can be selected by their device name in the connection settings. For a Pearl in another network, the address is entered manually as before.
 - The Pearl can be entered by hostname as well as by IP address, e.g. `<serial number>.local`
 - A wrong username or password is shown as such in the connection status
 - New variables (firmware 4.24.1 or newer):

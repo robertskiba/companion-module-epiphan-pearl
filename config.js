@@ -6,46 +6,35 @@ const { Regex } = require('@companion-module/base')
  *
  * @access public
  * @since 1.0.0
- * @param {{address: string, port: number, model: string, serial: string}[]} [foundDevices] - result
- *   of the network scan, undefined as long as no scan has completed
  * @returns {Array} the config fields
  */
-const get_config_fields = (foundDevices) => {
+const get_config_fields = () => {
 	return [
-		// Shown as soon as a scan has completed, also without results, so "No Pearl found" is visible
-		// here and not only in the log. Selecting an entry applies its address, see configUpdated().
-		...(foundDevices !== undefined
-			? [
-					{
-						type: 'dropdown',
-						id: 'foundDevices',
-						label: 'Found Pearl Devices',
-						tooltip:
-							'Filled in automatically when the Pearl can not be reached: the module then searches the local network once for Pearls. Select an entry to use its address.',
-						width: 12,
-						default: '',
-						choices:
-							foundDevices.length > 0
-								? [
-										{ id: '', label: 'Select a found device...' },
-										...foundDevices.map((d) => ({
-											id: `${d.address}:${d.port}`,
-											label: `${d.address}${d.port !== 80 ? ':' + d.port : ''} (${[d.model, d.serial].filter(Boolean).join(' ')})`,
-										})),
-									]
-								: [{ id: '', label: 'No Pearl found' }],
-					},
-				]
-			: []),
+		// Pearls in the same network announce themselves via Bonjour as '_epiphan._tcp' (checked on a
+		// Pearl-2 with firmware 4.24.6), see bonjourQueries in companion/manifest.json. Companion lists
+		// them here with the device name of the Pearl and offers "Manual" for all other cases, e.g. a
+		// Pearl in another network. The value is 'host:port', or null for "Manual".
+		{
+			type: 'bonjour-device',
+			id: 'bonjourHost',
+			label: 'Pearl',
+			tooltip:
+				'Pearls in the same network as Companion are found automatically. Select "Manual" to enter the address yourself, e.g. for a Pearl in another network.',
+			width: 6,
+			// the manual address fields below refer to this field, see isVisibleExpression
+			disableAutoExpression: true,
+		},
 		{
 			type: 'textinput',
 			id: 'host',
 			label: 'Target IP or hostname',
 			width: 6,
 			default: '192.168.255.250',
-			// hostnames are allowed too, e.g. <serial number>.local, the name a Pearl announces on the network
+			// hostnames are allowed too, e.g. <device name>.local, the name a Pearl announces on the network
 			regex: Regex.HOSTNAME,
-			tooltip: 'IP address or hostname of the Pearl, e.g. 192.168.1.20 or <serial number>.local',
+			tooltip: 'IP address or hostname of the Pearl, e.g. 192.168.1.20 or <device name>.local',
+			// only needed when no Pearl is selected in the Bonjour field
+			isVisibleExpression: '!$(options:bonjourHost)',
 		},
 		{
 			type: 'textinput',
@@ -54,6 +43,7 @@ const get_config_fields = (foundDevices) => {
 			width: 6,
 			default: '80',
 			regex: Regex.PORT,
+			isVisibleExpression: '!$(options:bonjourHost)',
 		},
 		{
 			type: 'textinput',
