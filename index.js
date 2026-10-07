@@ -574,7 +574,7 @@ class EpiphanPearl extends InstanceBase {
 		} // start with a fresh object, during the update some properties will be unavailable, so it is best to not do live updates
 
 		// Get all channels and recorders available (in parallel)
-		let channels, recorders, recorders_status, systemStatus, firmware, identity, afu, encoderStatus
+		let channels, recorders, recorders_status, systemStatus, firmware, identity, afu, encoderStatus, storages
 		// Fix: the optional v2.0 endpoints are requested separately with allSettled. Before, they were part
 		// of the Promise.all below, so one failing optional endpoint (e.g. afu/status without Automatic
 		// File Upload configured) made the whole poll fail and no feedback was updated anymore.
@@ -588,6 +588,7 @@ class EpiphanPearl extends InstanceBase {
 			// API, also on firmware with API v2.0 (checked on a Pearl-2 with 4.24.6). API v2.0 only reports
 			// the encoder settings, where the bitrate is 0 when it is set to automatic.
 			this.sendRequest('get', '/api/channels/status?encoders=yes', {}, { legacy: true }),
+			v2 ? this.fetchStorages() : undefined,
 		])
 		// wait for all requests before deciding, otherwise a late successful answer could set the status
 		// back to OK after the poll already failed
@@ -624,7 +625,7 @@ class EpiphanPearl extends InstanceBase {
 			this.log('info', 'Connection to the Pearl restored')
 			this.connectionFailed = false
 		}
-		;[systemStatus, firmware, identity, afu, encoderStatus] = optionalResults.map((res) =>
+		;[systemStatus, firmware, identity, afu, encoderStatus, storages] = optionalResults.map((res) =>
 			res.status === 'fulfilled' ? res.value : undefined,
 		)
 
@@ -634,11 +635,15 @@ class EpiphanPearl extends InstanceBase {
 			state.channels[channel.id].publishers = {}
 		})
 
-		// v1 API: add the encoder status (resolution, bitrate) to the encoders of each channel
+		// v1 API: add the channel status (signal, total bitrate) and the encoder status (resolution,
+		// bitrate) to each channel
 		if (Array.isArray(encoderStatus)) {
 			for (const channelStatus of encoderStatus) {
 				const channelState = state.channels[channelStatus.id]
-				if (!channelState || !Array.isArray(channelStatus.encoders)) continue
+				if (!channelState) continue
+				if (channelStatus.status && !Array.isArray(channelStatus.status))
+					channelState.status = channelStatus.status
+				if (!Array.isArray(channelStatus.encoders)) continue
 				const encoders = Array.isArray(channelState.encoders) ? [...channelState.encoders] : []
 				for (const encoder of channelStatus.encoders) {
 					const index = encoders.findIndex((e) => e.id === encoder.id)
@@ -662,6 +667,7 @@ class EpiphanPearl extends InstanceBase {
 		if (firmware) state.firmware = firmware
 		if (identity) state.identity = identity
 		if (afu) state.afu = afu
+		if (storages) state.storages = storages
 
 		// Get all layouts and publishers for all channels and all recorder states (in parallel)
 		await Promise.allSettled([
@@ -958,6 +964,26 @@ class EpiphanPearl extends InstanceBase {
 		this.log('debug', 'Updating RECORDER_STATES and then call checkFeedbacks(recorderRecording)')
 		this.checkFeedbacks('recorderRecording')
 		variables.updateVariables(this)
+	}
+
+	/**
+	 * INTERNAL: Get the status of all storages (API v2.0), e.g. { main: { state, total, free }, ... }
+	 * Storages without a device (e.g. no USB stick) only report their state.
+	 *
+	 * @private
+	 * @returns {Promise<Object>}
+	 */
+	async fetchStorages() {
+		const list = await this.sendRequest('get', '/api/system/storages', {})
+		if (!Array.isArray(list)) return undefined
+		const results = await Promise.allSettled(
+			list.map((storage) => this.sendRequest('get', '/api/system/storages/' + storage.id + '/status', {})),
+		)
+		const storages = {}
+		list.forEach((storage, index) => {
+			if (results[index].status === 'fulfilled') storages[storage.id] = results[index].value
+		})
+		return storages
 	}
 
 	/**

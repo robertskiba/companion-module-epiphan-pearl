@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - If the Pearl is not reachable, the module tries to reconnect every 10 seconds
 - The Pearl can be entered by hostname as well as by IP address, e.g. `<serial number>.local`
 - A wrong username or password is shown as such in the connection status
+- New variables (firmware 4.24.1 or newer):
+  - Storage of the internal drive and USB drives: state, total, used and free space in GB and %, and the estimated remaining recording time based on the running recordings
+  - Input signal (OK / No signal) and current total bitrate of each channel
+  - Recording duration, stream duration and system uptime as hh:mm:ss
+  - Stream reconnections and error description
+  - Warnings for high CPU load and CPU temperature, using the thresholds of the Pearl
 
 ### Bug Fixes
 

@@ -13,3 +13,10 @@ If the Pearl is not reachable, the module retries the connection every 10 second
 - Get/Set layout data
 - Insert marker
 - Reboot/shutdown system
+
+**Variables (selection)**
+
+- Storage per drive (`main` = internal drive, `external` = USB drive): state, total/used/free in GB and %, estimated remaining recording time (hh:mm, calculated from the bitrate of the running recordings, empty while nothing is recorded)
+- Per channel: name, active layout, input signal, resolution, fps, bitrate
+- Per recorder: state and duration, per stream: state, duration, reconnections and error
+- System: firmware, uptime, CPU load and temperature with warnings, device name and location
