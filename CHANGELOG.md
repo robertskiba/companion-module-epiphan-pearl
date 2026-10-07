@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Important
 
-- Requires Companion 4.3 or newer
+- Requires Companion 5.0 or newer
 - The option "Use API v2.0" was removed. The module now automatically uses the best connection method for the firmware of your Pearl.
 - "Get layout data" no longer asks for a custom variable. Choose where to store the result directly in Companion, like for other actions that return a value. Existing buttons are converted automatically.
 
